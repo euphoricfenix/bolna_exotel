@@ -1,6 +1,6 @@
 region: us
 version: '2'
-authtoken: 30xuQfJCJJmYeVjswNwl6PzcTt7_ZqSBdmMrJ3jJR5snPLAX
+authtoken: 
 tunnels:
   exotel-app:
     addr: exotel-app:8003
