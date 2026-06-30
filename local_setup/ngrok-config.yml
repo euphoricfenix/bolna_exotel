@@ -1,12 +1,9 @@
 region: us
 version: '2'
-authtoken: <your-auth-token>
+authtoken: 30xuQfJCJJmYeVjswNwl6PzcTt7_ZqSBdmMrJ3jJR5snPLAX
 tunnels:
-  twilio-app:
-    addr: twilio-app:8001
-    proto: http
-  plivo-app:
-    addr: plivo-app:8002
+  exotel-app:
+    addr: exotel-app:8003
     proto: http
   bolna-app:
     addr: bolna-app:5001

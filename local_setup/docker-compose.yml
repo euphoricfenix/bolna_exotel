@@ -40,27 +40,41 @@ services:
       - 4040:4040
 
   ### Telephony servers ###
-  twilio-app:
-    build:
-      context: .
-      dockerfile: dockerfiles/twilio_server.Dockerfile
-    image: twilio-app:latest  # This will tag the built image
-    ports:
-      - "8001:8001"
-    depends_on:
-      - redis
-      - ngrok
-      - bolna-app
-    env_file:
-      - .env
+#  twilio-app:
+#    build:
+#      context: .
+#      dockerfile: dockerfiles/twilio_server.Dockerfile
+#    image: twilio-app:latest  # This will tag the built image
+#    ports:
+#      - "8001:8001"
+#    depends_on:
+#      - redis
+#      - ngrok
+#      - bolna-app
+#    env_file:
+#      - .env
 
-  plivo-app:
+#  plivo-app:
+#    build:
+#      context: .
+#      dockerfile: dockerfiles/plivo_server.Dockerfile
+#    image: plivo-app:latest  # This will tag the built image
+#    ports:
+#      - "8002:8002"
+#    depends_on:
+#      - redis
+#      - ngrok
+#      - bolna-app
+#    env_file:
+#      - .env
+
+  exotel-app:
     build:
       context: .
-      dockerfile: dockerfiles/plivo_server.Dockerfile
-    image: plivo-app:latest  # This will tag the built image
+      dockerfile: dockerfiles/exotel_server.Dockerfile
+    image: exotel-app:latest  # This will tag the built image
     ports:
-      - "8002:8002"
+      - "8003:8003"
     depends_on:
       - redis
       - ngrok
