@@ -1887,6 +1887,62 @@ class TaskManager(BaseManager):
 
         return cleaned
 
+    def save_transcript(self, messages):
+        """
+        Save the final cleaned conversation transcript after the call ends.
+        """
+
+        try:
+            if not messages:
+                logger.warning("Conversation history is empty. Skipping transcript save.")
+                return
+
+            os.makedirs("transcripts", exist_ok=True)
+
+            transcript_lines = []
+
+            for message in messages:
+                role = message.get("role")
+                role = role.value if hasattr(role, "value") else role
+
+                if role == "system":
+                    continue
+
+                content = message.get("content", "")
+
+                if not content:
+                    continue
+                
+                transcript_lines.append(
+                    f"{str(role).upper()}: {content}"
+                )
+
+            transcript = {
+                "run_id": self.run_id,
+                "assistant_id": self.assistant_id,
+                "timestamp": datetime.utcnow().isoformat(),
+                "conversation": messages,
+                "transcript": "\n".join(transcript_lines),
+            }
+
+            filename = os.path.join(
+                "transcripts",
+                f"{datetime.now():%Y%m%d_%H%M%S}_{self.run_id}.json",
+            )
+
+            with open(filename, "w", encoding="utf-8") as f:
+                json.dump(
+                    transcript,
+                    f,
+                    indent=2,
+                    ensure_ascii=False,
+                )
+
+            logger.info(f"Transcript saved to {filename}")
+
+        except Exception:
+            logger.exception("Failed to save transcript")
+
     @staticmethod
     def _get_latest_turn_id_from_marks(mark_events_data):
         latest_turn_id = None
@@ -6620,6 +6676,13 @@ class TaskManager(BaseManager):
                     output["recording_url"] = await save_audio_file_to_s3(
                         self.conversation_recording, self.sampling_rate, self.assistant_id, self.run_id
                     )
+
+                # Save transcript here
+                try:
+                    self.save_transcript(output["messages"])
+                except Exception:
+                    logger.exception("Failed to save transcript.")
+                
             else:
                 output = self.input_parameters
                 if self.task_config["task_type"] == "extraction":
