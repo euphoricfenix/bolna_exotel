@@ -100,6 +100,33 @@ def float32_to_int16(float_audio):
     return int16_audio
 
 
+def convert_wav_bytes_to_mono_pcm(wav_bytes, target_sample_rate=8000):
+    """Downmix (any channel count) + resample arbitrary WAV bytes to raw 16-bit mono PCM."""
+    audio = AudioSegment.from_file(io.BytesIO(wav_bytes), format="wav")
+    audio = audio.set_channels(1).set_frame_rate(target_sample_rate).set_sample_width(2)
+    return audio.raw_data
+
+
+def mix_pcm_with_loop(pcm_bytes, loop_buffer, loop_pos, volume=0.2):
+    """Mix 16-bit mono PCM with a same-length slice of loop_buffer starting at loop_pos,
+    wrapping back to the start as needed. Returns (mixed_bytes, new_loop_pos)."""
+    n = len(pcm_bytes)
+    buf_len = len(loop_buffer)
+    if buf_len == 0 or n == 0:
+        return pcm_bytes, loop_pos
+    end = loop_pos + n
+    if end <= buf_len:
+        loop_slice = loop_buffer[loop_pos:end]
+        new_pos = end % buf_len
+    else:
+        loop_slice = loop_buffer[loop_pos:] + loop_buffer[: end - buf_len]
+        new_pos = end - buf_len
+    speech = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.int32)
+    ambient = np.frombuffer(loop_slice, dtype=np.int16).astype(np.int32)
+    mixed = np.clip(speech + (ambient * volume).astype(np.int32), -32768, 32767).astype(np.int16)
+    return mixed.tobytes(), new_pos
+
+
 def wav_bytes_to_pcm(wav_bytes):
     wav_buffer = io.BytesIO(wav_bytes)
     rate, data = wavfile.read(wav_buffer)
@@ -886,6 +913,53 @@ def pcm_to_ulaw(pcm_bytes):
     # audioop.lin2ulaw expects 16-bit PCM and returns 8-bit ulaw
     ulaw_bytes = audioop.lin2ulaw(pcm_bytes, 2)  # 2 = sample width in bytes (16-bit)
     return ulaw_bytes
+
+
+def audio_to_mulaw8k(audio, rate_hint=8000, format_hint=""):
+    """One-shot synth output (base64 str / WAV / raw PCM) → mono 16-bit 8kHz mu-law.
+    Undecodable compressed containers (MP3/Ogg/FLAC) return None — never raw noise."""
+    import base64
+
+    if isinstance(audio, str):
+        audio = base64.b64decode(audio)
+    try:
+        # Explicit format for WAV takes pydub's native reader — no ffprobe/ffmpeg.
+        segment = AudioSegment.from_file(io.BytesIO(audio), format="wav" if audio[:4] == b"RIFF" else None)
+    except Exception:
+        if (
+            audio[:3] == b"ID3"
+            or audio[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2")
+            or audio[:4] in (b"OggS", b"fLaC")
+        ):
+            return None
+        # Headerless audio: trust the caller's declared rate/format.
+        if "law" in str(format_hint or ""):
+            audio = audioop.ulaw2lin(audio, 2)
+        segment = AudioSegment(data=audio, sample_width=2, frame_rate=int(rate_hint or 8000), channels=1)
+    segment = segment.set_frame_rate(8000).set_channels(1).set_sample_width(2)
+    return pcm_to_ulaw(segment.raw_data)
+
+
+def soniox_ws_url(host):
+    """Soniox realtime WS endpoint — single source of truth for transcriber + LID tap."""
+    protocol = os.getenv("SONIOX_HOST_PROTOCOL", "wss")
+    return f"{protocol}://{host}/transcribe-websocket"
+
+
+def build_soniox_config(api_key, model, audio_format, sample_rate, **extras):
+    """Soniox first-frame config (auth rides in it) — shared by transcriber + LID tap.
+    extras merge on top (language_hints, context, endpoint tuning...)."""
+    config = {
+        "api_key": api_key,
+        "model": model,
+        "audio_format": audio_format,
+        "sample_rate": int(sample_rate),
+        "num_channels": 1,
+        "enable_endpoint_detection": True,
+        "enable_language_identification": True,
+    }
+    config.update({k: v for k, v in extras.items() if v is not None})
+    return config
 
 
 def compute_function_pre_call_message(language, function_name, api_tool_pre_call_message):

@@ -47,6 +47,24 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                 logger.info("No audio data in packet, skipping send")
                 return
 
+            if meta_info.get("message_category") == "ambient_idle":
+                # Background filler sent while the output queue is idle — no mark
+                # tracking. A mark ACK comes back as pre_mark_message, and
+                # process_mark_message unconditionally flips is_audio_being_played
+                # True on that (input_handlers/default.py). These frames fire every
+                # ~100ms while the caller is silent OR speaking, so that flag would
+                # never clear and real turns would be mistaken for barge-in and
+                # silently dropped for as long as ambient noise keeps flowing.
+                try:
+                    if self.stream_sid and audio_chunk != b"\x00\x00":
+                        audio_format = meta_info.get("format", "wav")
+                        media_message = await self.form_media_message(audio_chunk, audio_format)
+                        await self.websocket.send_text(json.dumps(media_message))
+                except Exception as e:
+                    self._closed = True
+                    logger.debug(f"WebSocket send failed (client disconnected): {e}")
+                return
+
             try:
                 if len(audio_chunk) == 1:
                     audio_chunk += b"\x00"

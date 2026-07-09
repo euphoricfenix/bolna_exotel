@@ -23,25 +23,17 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install uvicorn
 
-# Install common dependencies that bolna requires
+# Install the bolna package from local source (this repo), not from PyPI/GitHub —
+# keeps whatever local fixes are checked in actually running in the container.
+COPY bolna /app/bolna_src/bolna
+COPY pyproject.toml requirements.txt README.md LICENSE /app/bolna_src/
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install \
-    python-dotenv \
-    pydantic \
-    fastapi \
-    huggingface-hub \
-    numpy \
-    tqdm \
-    requests
-
-# Install bolna package with verbose output for debugging
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --verbose git+https://github.com/bolna-ai/bolna@master || \
+    pip install /app/bolna_src || \
     (echo "Failed to install bolna package. See error above." && exit 1)
 
 # Copy application files
-COPY quickstart_server.py /app/
-COPY presets /app/presets
+COPY local_setup/quickstart_server.py /app/
+COPY local_setup/presets /app/presets
 
 EXPOSE 5001
 

@@ -46,6 +46,7 @@ class AssistantManager(BaseManager):
             self.kwargs["agent_welcome_message"] = update_prompt_with_context(
                 agent_config.get("agent_welcome_message", AGENT_WELCOME_MESSAGE), context_data
             )
+        self.kwargs["welcome_message_audio"] = agent_config.get("welcome_message_audio")
 
     async def run(self, local=False, run_id=None):
         """

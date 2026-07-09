@@ -77,6 +77,8 @@ from bolna.helpers.utils import (
     get_md5_hash,
     clean_json_string,
     wav_bytes_to_pcm,
+    convert_wav_bytes_to_mono_pcm,
+    mix_pcm_with_loop,
     convert_to_request_log,
     yield_chunks_from_memory,
     process_task_cancellation,
@@ -552,6 +554,21 @@ class TaskManager(BaseManager):
                 self.last_transmitted_timestamp = 0
 
                 self.use_fillers = self.conversation_config.get("use_fillers", False)
+                self.filler_trigger_delay_ms = self.conversation_config.get("filler_trigger_delay_ms", 1000)
+                self.filler_response_gap_ms = self.conversation_config.get("filler_response_gap_ms", 300)
+
+                self.use_ambient_noise = self.conversation_config.get("ambient_noise", False)
+                self.ambient_noise_track = self.conversation_config.get("ambient_noise_track", "call-center")
+                self.ambient_noise_volume = self.conversation_config.get("ambient_noise_volume", 0.65)
+                self.ambient_noise_pcm = None
+                self.ambient_noise_pos = 0
+                self.ambient_noise_load_task = None
+                if self.use_ambient_noise:
+                    # Started eagerly here (not lazily in __process_output_loop) because
+                    # __forced_first_message — which plays the welcome message — is
+                    # launched from __init__ itself and can finish before that loop even
+                    # starts. Both consumers await this same task before mixing.
+                    self.ambient_noise_load_task = asyncio.create_task(self.__load_ambient_noise())
                 self.use_llm_to_determine_hangup = self.conversation_config.get("hangup_after_LLMCall", False)
                 self.check_for_completion_prompt = None
                 if self.use_llm_to_determine_hangup:
@@ -667,6 +684,21 @@ class TaskManager(BaseManager):
                         self.should_backchannel = False
                 else:
                     self.backchanneling_audio_map = []
+
+                # Filler audio presets (played before tool/function calls when use_fillers is on)
+                self.filler_preset_directory = None
+                self.filler_filenames = []
+                if self.use_fillers and not turn_based_conversation and task_id == 0:
+                    self.filler_preset_directory = kwargs.get("filler_audio_location", os.getenv("FILLER_PRESETS_DIR"))
+                    try:
+                        self.filler_filenames = [
+                            os.path.splitext(f)[0] for f in get_file_names_in_directory(self.filler_preset_directory)
+                        ]
+                        logger.info(f"Filler audio location {self.filler_preset_directory}")
+                    except Exception as e:
+                        logger.error(f"Something went wrong listing filler presets, disabling fillers: {e}")
+                        self.use_fillers = False
+
                 # Agent welcome message
                 if "agent_welcome_message" in self.kwargs:
                     logger.info(f"Agent welcome message: {self.kwargs['agent_welcome_message']}")
@@ -1262,6 +1294,20 @@ class TaskManager(BaseManager):
                             engine=self.tools["synthesizer"].get_engine(),
                             run_id=self.run_id,
                         )
+                        if self.ambient_noise_load_task is not None:
+                            await self.ambient_noise_load_task
+                        if (
+                            self.use_ambient_noise
+                            and self.ambient_noise_pcm
+                            and message["meta_info"].get("format") == "pcm"
+                            and isinstance(message.get("data"), bytes)
+                        ):
+                            message["data"], self.ambient_noise_pos = mix_pcm_with_loop(
+                                message["data"],
+                                self.ambient_noise_pcm,
+                                self.ambient_noise_pos,
+                                volume=self.ambient_noise_volume,
+                            )
                         await self.tools["output"].handle(message)
                         try:
                             data = message.get("data")
@@ -1886,6 +1932,62 @@ class TaskManager(BaseManager):
             cleaned.append(message)
 
         return cleaned
+
+    def save_transcript(self, messages):
+        """
+        Save the final cleaned conversation transcript after the call ends.
+        """
+
+        try:
+            if not messages:
+                logger.warning("Conversation history is empty. Skipping transcript save.")
+                return
+
+            os.makedirs("transcripts", exist_ok=True)
+
+            transcript_lines = []
+
+            for message in messages:
+                role = message.get("role")
+                role = role.value if hasattr(role, "value") else role
+
+                if role == "system":
+                    continue
+
+                content = message.get("content", "")
+
+                if not content:
+                    continue
+                
+                transcript_lines.append(
+                    f"{str(role).upper()}: {content}"
+                )
+
+            transcript = {
+                "run_id": self.run_id,
+                "assistant_id": self.assistant_id,
+                "timestamp": datetime.utcnow().isoformat(),
+                "conversation": messages,
+                "transcript": "\n".join(transcript_lines),
+            }
+
+            filename = os.path.join(
+                "transcripts",
+                f"{datetime.now():%Y%m%d_%H%M%S}_{self.run_id}.json",
+            )
+
+            with open(filename, "w", encoding="utf-8") as f:
+                json.dump(
+                    transcript,
+                    f,
+                    indent=2,
+                    ensure_ascii=False,
+                )
+
+            logger.info(f"Transcript saved to {filename}")
+
+        except Exception:
+            logger.exception("Failed to save transcript")
 
     @staticmethod
     def _get_latest_turn_id_from_marks(mark_events_data):
@@ -3363,6 +3465,36 @@ class TaskManager(BaseManager):
             self._stage_assistant_history(meta_info, llm_response)
             self.conversation_history.sync_interim(messages)
 
+    async def __play_latency_filler_if_slow(
+        self, first_chunk_event: asyncio.Event, meta_info: dict, filler_played_flag: dict
+    ) -> None:
+        """Play a preset filler if the LLM hasn't streamed anything within filler_trigger_delay_ms.
+
+        Runs as a background task racing the LLM's first streamed chunk; cancelled as
+        soon as that chunk arrives. Independent of the pre-function-call filler, which
+        fires immediately on tool-call detection with no delay. Sets filler_played_flag["played"]
+        so the caller can insert filler_response_gap_ms before the real response's audio.
+        """
+        try:
+            await asyncio.wait_for(first_chunk_event.wait(), timeout=self.filler_trigger_delay_ms / 1000)
+        except asyncio.TimeoutError:
+            if first_chunk_event.is_set():
+                return
+            filler_played_flag["played"] = True
+            filler_key = random.choice(self.filler_filenames)
+            logger.info(
+                f"LLM slow to respond (> {self.filler_trigger_delay_ms}ms), playing latency filler '{filler_key}'"
+            )
+            filler_meta_info = copy.deepcopy(meta_info)
+            filler_meta_info["message_category"] = "filler"
+            # Own sequence_id so retiring the filler on playback-complete doesn't retire
+            # the real response's sequence_id before it's even been synthesized (that
+            # silently drops the real answer's audio — see is_valid_sequence in _synthesize).
+            filler_meta_info["sequence_id"] = self.interruption_manager.get_next_sequence_id()
+            await self._synthesize(create_ws_data_packet(filler_key, meta_info=filler_meta_info, is_md5_hash=True))
+        except asyncio.CancelledError:
+            pass
+
     async def __do_llm_generation(
         self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False
     ):
@@ -3397,10 +3529,26 @@ class TaskManager(BaseManager):
         # Pass detected language to LLM for pre_call_message selection
         meta_info["detected_language"] = self.language
 
+        first_llm_chunk_received = asyncio.Event()
+        latency_filler_task = None
+        filler_played_flag = {"played": False}
+        if self._is_conversation_task() and self.use_fillers and self.filler_filenames:
+            latency_filler_task = asyncio.create_task(
+                self.__play_latency_filler_if_slow(first_llm_chunk_received, meta_info, filler_played_flag)
+            )
+
         try:
             async for llm_message in self.tools["llm_agent"].generate(
                 messages, synthesize=synthesize, meta_info=meta_info
             ):
+                if not first_llm_chunk_received.is_set():
+                    first_llm_chunk_received.set()
+                    if filler_played_flag["played"] and self.filler_response_gap_ms > 0:
+                        logger.info(
+                            f"Filler was played for this turn; pausing {self.filler_response_gap_ms}ms "
+                            "before the real response so they don't splice together"
+                        )
+                        await asyncio.sleep(self.filler_response_gap_ms / 1000)
                 if (
                     isinstance(llm_message, dict) and "messages" in llm_message
                 ):  # custom list of messages before the llm call
@@ -3668,11 +3816,28 @@ class TaskManager(BaseManager):
                         self._stage_assistant_history(meta_info, filler_message)
                         self.conversation_history.sync_interim(messages)
 
+                        if self.use_fillers and self.filler_filenames:
+                            filler_key = random.choice(self.filler_filenames)
+                            logger.info(f"Playing preset filler audio '{filler_key}' instead of synthesizing text")
+                            filler_meta_info = copy.deepcopy(meta_info)
+                            filler_meta_info["message_category"] = "filler"
+                            # Own sequence_id — see comment in __play_latency_filler_if_slow for why
+                            # reusing the turn's sequence_id here silently drops the real response.
+                            filler_meta_info["sequence_id"] = self.interruption_manager.get_next_sequence_id()
+                            await self._synthesize(
+                                create_ws_data_packet(filler_key, meta_info=filler_meta_info, is_md5_hash=True)
+                            )
+                            continue
+
                     await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
         except BolnaComponentError:
             raise
         except Exception as e:
             raise LLMError(str(e), provider=self.llm_config.get("provider"), model=self.llm_config.get("model")) from e
+        finally:
+            first_llm_chunk_received.set()
+            if latency_filler_task is not None:
+                latency_filler_task.cancel()
 
         filler_message = compute_function_pre_call_message(self.language, function_tool, function_tool_message)
         if self.stream and llm_response != filler_message:
@@ -5739,7 +5904,23 @@ class TaskManager(BaseManager):
 
     # Currently this loop only closes in case of interruption
     # but it shouldn't be the case.
+    async def __load_ambient_noise(self):
+        """Load and downmix the configured ambient noise track to 8kHz mono PCM, once per call."""
+        try:
+            ambient_dir = os.getenv("AMBIENT_NOISE_PRESETS_DIR")
+            file_path = f"{ambient_dir}/{self.ambient_noise_track}.wav"
+            raw_wav = await get_raw_audio_bytes(file_path, local=True, is_location=True)
+            if raw_wav is None:
+                raise FileNotFoundError(file_path)
+            self.ambient_noise_pcm = convert_wav_bytes_to_mono_pcm(raw_wav, target_sample_rate=8000)
+            logger.info(f"Loaded ambient noise track '{self.ambient_noise_track}' from {file_path}")
+        except Exception as e:
+            logger.error(f"Something went wrong loading ambient noise, disabling it: {e}")
+            self.use_ambient_noise = False
+
     async def __process_output_loop(self):
+        if self.ambient_noise_load_task is not None:
+            await self.ambient_noise_load_task
         try:
             while True:
                 if self.tools["input"].welcome_message_played():
@@ -5752,7 +5933,29 @@ class TaskManager(BaseManager):
                 else:
                     logger.info(f"Started transmitting at {time.time()}")
 
-                message = await self.buffered_output_queue.get()
+                try:
+                    message = await asyncio.wait_for(self.buffered_output_queue.get(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    # Idle gap (queue empty) — keep ambient noise flowing continuously,
+                    # including while the caller is speaking. sequence_id=-1 is the
+                    # reserved background-audio id: always valid (interruption_manager
+                    # never retires it) and final_chunk_played_observer explicitly skips
+                    # it, so this can't desync hangup-silence timers or turn sequencing.
+                    # Sent directly here (not via a separate task) so it stays serialized
+                    # on the same websocket as everything else __process_output_loop sends.
+                    if self.use_ambient_noise and self.ambient_noise_pcm and self.tools["input"].welcome_message_played():
+                        silence_frame = b"\x00\x00" * 800  # 100ms at 8kHz mono 16-bit
+                        ambient_frame, self.ambient_noise_pos = mix_pcm_with_loop(
+                            silence_frame, self.ambient_noise_pcm, self.ambient_noise_pos, volume=self.ambient_noise_volume
+                        )
+                        idle_meta_info = {
+                            "sequence_id": -1,
+                            "format": "pcm",
+                            "message_category": "ambient_idle",
+                            "request_id": str(uuid.uuid4()),
+                        }
+                        await self.tools["output"].handle(create_ws_data_packet(ambient_frame, meta_info=idle_meta_info))
+                    continue
 
                 if "end_of_conversation" in message["meta_info"]:
                     await self.__process_end_of_conversation()
@@ -5780,6 +5983,18 @@ class TaskManager(BaseManager):
                         self._commit_staged_assistant_history(sequence_id)
                         self.tools["input"].update_is_audio_being_played(True)
                         self.response_in_pipeline = False
+                        if (
+                            self.use_ambient_noise
+                            and self.ambient_noise_pcm
+                            and message["meta_info"].get("format") == "pcm"
+                            and isinstance(message.get("data"), bytes)
+                        ):
+                            message["data"], self.ambient_noise_pos = mix_pcm_with_loop(
+                                message["data"],
+                                self.ambient_noise_pcm,
+                                self.ambient_noise_pos,
+                                volume=self.ambient_noise_volume,
+                            )
                         await self.tools["output"].handle(message)
                         # Track when agent audio first starts flowing for this sequence.
                         # Only fire on real audio bytes — BOS/EOS control packets are strings
@@ -6620,6 +6835,13 @@ class TaskManager(BaseManager):
                     output["recording_url"] = await save_audio_file_to_s3(
                         self.conversation_recording, self.sampling_rate, self.assistant_id, self.run_id
                     )
+
+                # Save transcript here
+                try:
+                    self.save_transcript(output["messages"])
+                except Exception:
+                    logger.exception("Failed to save transcript.")
+                
             else:
                 output = self.input_parameters
                 if self.task_config["task_type"] == "extraction":

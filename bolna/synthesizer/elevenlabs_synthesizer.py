@@ -211,6 +211,19 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                 data = json.loads(response)
                 consecutive_errors = 0  # successful recv — reset the error backoff
 
+                # Diagnostic: full message shape so we can see exactly what ElevenLabs
+                # sent (or omitted) when audio is missing — e.g. an "error" field, or
+                # a message with no "audio" key at all despite a real turn.
+                logger.info(
+                    "WS recv RAW trace_id=%s keys=%s contextId=%s has_audio=%s error=%s message=%s",
+                    self.ws_trace_id,
+                    list(data.keys()),
+                    data.get("contextId"),
+                    bool(data.get("audio")),
+                    data.get("error"),
+                    data.get("message"),
+                )
+
                 ctx = data.get("contextId")
                 if ctx in self.context_ids_to_ignore:
                     continue
@@ -244,6 +257,9 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                     logger.info(f"WS recv isFinal trace_id={self.ws_trace_id}")
                     audio_chunk_count = 0
                     last_recv_time = None
+                    # Reset so the next turn's first chunk logs its own send-to-recv
+                    # latency instead of measuring from this call's very first turn.
+                    self.ws_send_time = None
                     emit_eos = True
 
                 elif self.last_text_sent:

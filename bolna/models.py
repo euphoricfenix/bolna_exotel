@@ -546,8 +546,19 @@ class ConversationConfig(BaseModel):
     backchanneling_message_gap: Optional[int] = 5
     backchanneling_start_delay: Optional[int] = 5
     ambient_noise: Optional[bool] = False
+    # Which preset under AMBIENT_NOISE_PRESETS_DIR to loop (e.g. "call-center").
+    ambient_noise_track: Optional[str] = "call-center"
+    # Mix gain applied to the ambient track relative to full scale (0-1).
+    ambient_noise_volume: Optional[float] = 0.65
     call_terminate: Optional[int] = 90
     use_fillers: Optional[bool] = False
+    # If the LLM hasn't streamed anything within this window, play a preset filler
+    # to mask the wait (in addition to the pre-function-call filler, which fires
+    # immediately on tool-call detection regardless of this timer).
+    filler_trigger_delay_ms: Optional[int] = 1000
+    # Pause after a latency filler finishes before the real response starts playing —
+    # without this they splice together with zero gap, which sounds unnatural.
+    filler_response_gap_ms: Optional[int] = 300
     trigger_user_online_message_after: Optional[int] = 10
     check_user_online_message: Optional[Union[str, Dict[str, str]]] = "Hey, are you still there"
     check_if_user_online: Optional[bool] = True
@@ -575,3 +586,4 @@ class AgentModel(BaseModel):
     agent_type: str = "other"
     tasks: List[Task]
     agent_welcome_message: Optional[str] = AGENT_WELCOME_MESSAGE
+    welcome_message_audio: Optional[str] = None
