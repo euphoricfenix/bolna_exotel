@@ -27,11 +27,18 @@ class ExotelInputHandler(TelephonyInputHandler):
             observable_variables=observable_variables,
         )
         self.io_provider = "exotel"
+        self.from_number = None
+        self.to_number = None
 
     async def call_start(self, packet):
         start = packet["start"]
         self.call_sid = start["call_sid"]
         self.stream_sid = start["stream_sid"]
+        self.from_number = start.get("from")
+        self.to_number = start.get("to")
+
+    def get_from_number(self):
+        return self.from_number
 
     def get_mark_event_meta_data_obj(self, packet):
         mark_id = packet["mark"]["name"]

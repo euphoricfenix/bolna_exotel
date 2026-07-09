@@ -2,6 +2,7 @@ import os
 import asyncio
 import uuid
 import traceback
+import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 import redis.asyncio as redis
@@ -15,6 +16,55 @@ from bolna.agent_manager.assistant_manager import AssistantManager
 
 load_dotenv()
 logger = configure_logger(__name__)
+
+# --- CRM call-transcript webhook ---------------------------------------------
+# Posts the finished conversation to the koi-crm /api/calls/end endpoint so it
+# can run its post-call AI analysis (intent, risk, summary). Opt-in via env —
+# if either var is unset, the webhook is skipped entirely rather than failing.
+KOI_CRM_URL = os.getenv("KOI_CRM_URL", "http://localhost:3000")
+KOI_CRM_ORGANIZATION_ID = os.getenv("KOI_CRM_ORGANIZATION_ID")
+CALLS_WEBHOOK_SECRET = os.getenv("CALLS_WEBHOOK_SECRET")
+
+
+async def send_call_transcript_to_crm(task_output: dict):
+    """Fire-and-log POST of the finished call to koi-crm. Never raises —
+    a webhook failure must not affect call teardown."""
+    if not KOI_CRM_ORGANIZATION_ID or not CALLS_WEBHOOK_SECRET:
+        logger.info("KOI_CRM_ORGANIZATION_ID/CALLS_WEBHOOK_SECRET not set, skipping calls/end webhook")
+        return
+
+    messages = task_output.get("messages") or []
+    transcript = [
+        {"role": m.get("role"), "content": m.get("content")}
+        for m in messages
+        if m.get("role") != "system" and m.get("content")
+    ]
+    if not transcript:
+        logger.info("No conversation turns to send to CRM, skipping calls/end webhook")
+        return
+
+    payload = {
+        "organizationId": KOI_CRM_ORGANIZATION_ID,
+        "phone": task_output.get("from_number"),
+        "duration": task_output.get("conversation_time"),
+        "direction": "inbound",
+        "recordingUrl": task_output.get("recording_url"),
+        "transcript": transcript,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{KOI_CRM_URL.rstrip('/')}/api/calls/end",
+                json=payload,
+                headers={"x-webhook-secret": CALLS_WEBHOOK_SECRET},
+            )
+            if resp.status_code >= 300:
+                logger.error(f"calls/end webhook returned {resp.status_code}: {resp.text}")
+            else:
+                logger.info(f"Sent call transcript to CRM: {resp.status_code}")
+    except Exception as e:
+        logger.error(f"Failed to send call transcript to CRM: {e}")
 
 redis_pool = redis.ConnectionPool.from_url(os.getenv("REDIS_URL"), decode_responses=True)
 redis_client = redis.Redis.from_pool(redis_pool)
@@ -191,6 +241,8 @@ async def websocket_endpoint(agent_id: str, websocket: WebSocket, user_agent: st
     try:
         async for index, task_output in assistant_manager.run(local=True):
             logger.info(task_output)
+            if index == 0:
+                await send_call_transcript_to_crm(task_output)
     except WebSocketDisconnect:
         active_websockets.remove(websocket)
     except Exception as e:

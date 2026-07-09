@@ -6683,6 +6683,7 @@ class TaskManager(BaseManager):
                     "language_switch_events": list(self.language_switch_events),
                     "call_sid": self.call_sid,
                     "stream_sid": self.stream_sid,
+                    "from_number": getattr(self.tools.get("input"), "get_from_number", lambda: None)(),
                     "transcriber_duration": self.transcriber_duration,
                     "synthesizer_characters": self.tools["synthesizer"].get_synthesized_characters(),
                     "ended_by_assistant": self.ended_by_assistant,
