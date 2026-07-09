@@ -42,7 +42,7 @@ except json.JSONDecodeError:
 # Fallback Bolna websocket host for non-ngrok / production deployments, e.g.
 # wss://bolna.yourdomain.com . When set, this is used directly and ngrok
 # tunnel discovery is skipped entirely (see resolve_bolna_host below) —
-# ngrok discovery iv-only and would otherwise burn through Exotel's
+# ngrok discovery is dev-only and would otherwise burn through Exotel's
 # 10-second handshake timeout on every single call in production, since it
 # always fails outside the local docker-compose stack.
 BOLNA_WS_HOST = os.environ.get("BOLNA_WS_HOST")
@@ -201,7 +201,7 @@ async def inbound_connect(request: Request):
             payload = dict(request.query_params)
 
         # Exotel sends the dialed number under varying keys depending on
-        # context; check t common ones.
+        # context; check the common ones.
         to_number = (
             payload.get("To")
             or payload.get("to")
@@ -250,7 +250,7 @@ async def stream_ws(ws: WebSocket):
     # is treated as a secondary signal — EXOPHONE_AGENT_MAP (keyed off the
     # 'to' number, which always arrives reliably in the start event) is the
     # primary, more robust inbound routing strategy below.
-    qsnt_id = None
+    qs_agent_id = None
     try:
         qs = parse_qs(ws.scope.get("query_string", b"").decode())
         qs_agent_id = (qs.get("agent_id") or [None])[0]
@@ -302,7 +302,7 @@ async def stream_ws(ws: WebSocket):
         #   a) a per-Exophone mapping, keyed by the dialed 'to' number —
         #      PRIMARY strategy, since 'to' always arrives reliably in the
         #      start event (unlike custom_parameters, see note above)
-        #   b) custom_parametersn the 'start' event (set via the
+        #   b) custom_parameters on the 'start' event (set via the
         #      Voicebot Applet's static wss:// URL, e.g. ?agent_id=XYZ)
         #   c) the agent_id query param on this websocket connection itself
         #   d) a single default inbound agent
