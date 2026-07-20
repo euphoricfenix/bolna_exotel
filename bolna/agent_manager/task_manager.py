@@ -279,6 +279,11 @@ class TaskManager(BaseManager):
         self._turn_audio_flushed = asyncio.Event()
         self._turn_audio_flushed.set()
         self.hangup_mark_event_timeout = 10
+        # Separate, much shorter grace period for wait_for_current_message()'s mark-flush
+        # wait (e.g. before a tool call proceeds) — this is not a hangup-safety wait, so it
+        # shouldn't share hangup_mark_event_timeout's conservative 10s. A late/lost mark ack
+        # here was costing callers up to 10s of dead air per tool call (confirmed in logs).
+        self.mark_flush_wait_timeout = 0.3
 
         # Prompts
         self.prompts, self.system_prompt = {}, {}
@@ -2561,14 +2566,14 @@ class TaskManager(BaseManager):
                 if v.get("type") != "pre_mark_message" and v.get("sent_ts")
             ]
             expected_play_end = (entry_time + sum(remaining_durations)) if remaining_durations else entry_time
-            deadline = expected_play_end + self.hangup_mark_event_timeout
+            deadline = expected_play_end + self.mark_flush_wait_timeout
 
             remaining = deadline - time.time()
             if remaining <= 0:
                 logger.warning(
                     f"wait_for_current_message timed out: {len(mark_events)} marks unflushed, "
                     f"expected_play_end was {expected_play_end - entry_time:.1f}s after entry, "
-                    f"grace {self.hangup_mark_event_timeout}s exceeded"
+                    f"grace {self.mark_flush_wait_timeout}s exceeded"
                 )
                 break
 

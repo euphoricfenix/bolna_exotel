@@ -15,15 +15,28 @@ logger = configure_logger(__name__)
 
 class GeminiLLM(BaseLLM):
     def _clean_schema(self, schema):
-        """Gemini Protos don't support additionalProperties."""
+        """Translate OpenAI-style JSON schema to what Gemini Protos accept:
+        - additionalProperties is not supported → dropped
+        - union types like ["string", "null"] are not supported → single type + nullable=True
+        """
         if not isinstance(schema, dict):
             return schema
-        cleaned = {k: v for k, v in schema.items() if k != "additionalProperties"}
-        for k, v in cleaned.items():
+        cleaned = {}
+        for k, v in schema.items():
+            if k == "additionalProperties":
+                continue
+            if k == "type" and isinstance(v, list):
+                non_null = [t for t in v if t != "null"]
+                cleaned["type"] = non_null[0] if non_null else "string"
+                if "null" in v:
+                    cleaned["nullable"] = True
+                continue
             if isinstance(v, dict):
                 cleaned[k] = self._clean_schema(v)
             elif isinstance(v, list):
                 cleaned[k] = [self._clean_schema(i) if isinstance(i, dict) else i for i in v]
+            else:
+                cleaned[k] = v
         return cleaned
 
     def __init__(self, max_tokens=100, buffer_size=40, model="gemini-2.5-flash", temperature=0.1, **kwargs):
