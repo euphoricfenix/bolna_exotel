@@ -3826,10 +3826,19 @@ class TaskManager(BaseManager):
                         self._stage_assistant_history(meta_info, filler_message)
                         self.conversation_history.sync_interim(messages)
 
-                        # Only play the pre-call filler if the latency filler hasn't already
+                        # filler_message text is NEVER spoken for real — it's always either
+                        # replaced by a local preset-audio file, or dropped silently. Letting
+                        # it fall through to real TTS (as it did before this fix) adds an
+                        # extra ~2s "Just give me a moment, I'll be back with you." sentence
+                        # ahead of the real answer, which Exotel then has to play in real
+                        # wall-clock time — directly inflating the caller's wait.
+                        #
+                        # Only play a fresh local filler if the latency filler hasn't already
                         # fired for this same generation — otherwise a slow tool-decision
                         # produces BOTH a latency filler AND this one back-to-back (the
-                        # "bunch of fillers at once" bug). One filler per generation, max.
+                        # "bunch of fillers at once" bug). One filler per generation, max;
+                        # if one already played, drop this text with no audio at all rather
+                        # than speaking it.
                         if self.use_fillers and self.filler_filenames and not filler_played_flag["played"]:
                             filler_played_flag["played"] = True
                             if latency_filler_task is not None:
@@ -3844,7 +3853,12 @@ class TaskManager(BaseManager):
                             await self._synthesize(
                                 create_ws_data_packet(filler_key, meta_info=filler_meta_info, is_md5_hash=True)
                             )
-                            continue
+                        else:
+                            logger.info(
+                                "Dropping pre-function-call message text (a filler already played this turn) — "
+                                "not speaking it, just staged in history"
+                            )
+                        continue
 
                     await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
         except BolnaComponentError:
