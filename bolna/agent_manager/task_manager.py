@@ -568,6 +568,9 @@ class TaskManager(BaseManager):
                 self.ambient_noise_pcm = None
                 self.ambient_noise_pos = 0
                 self.ambient_noise_load_task = None
+                # Monotonic deadline for the next idle-ambient send (see the idle branch
+                # in __process_output_loop). None means "not yet scheduled".
+                self._ambient_next_due = None
                 if self.use_ambient_noise:
                     # Started eagerly here (not lazily in __process_output_loop) because
                     # __forced_first_message — which plays the welcome message — is
@@ -5974,18 +5977,43 @@ class TaskManager(BaseManager):
                     # it, so this can't desync hangup-silence timers or turn sequencing.
                     # Sent directly here (not via a separate task) so it stays serialized
                     # on the same websocket as everything else __process_output_loop sends.
+                    #
+                    # AMBIENT_IDLE_FRAME_S: sent as one bigger chunk every 500ms instead of
+                    # every 100ms. Each send is a discrete WS text message (JSON + base64);
+                    # at 10 msgs/sec for the whole call duration, per-message overhead on
+                    # the shared send path compounded into a growing backlog that delayed
+                    # real response audio more and more as calls went on (measured: real
+                    # response send->ack delay grew from ~0.8s to ~36s over one 3-minute
+                    # call, ~330ms of extra delay per second of call time — a rate that
+                    # matches ~33ms of overhead on each of the 10 idle sends/sec). Fewer,
+                    # larger chunks cut the message rate 5x, cutting that overhead 5x too.
                     if self.use_ambient_noise and self.ambient_noise_pcm and self.tools["input"].welcome_message_played():
-                        silence_frame = b"\x00\x00" * 800  # 100ms at 8kHz mono 16-bit
-                        ambient_frame, self.ambient_noise_pos = mix_pcm_with_loop(
-                            silence_frame, self.ambient_noise_pcm, self.ambient_noise_pos, volume=self.ambient_noise_volume
-                        )
-                        idle_meta_info = {
-                            "sequence_id": -1,
-                            "format": "pcm",
-                            "message_category": "ambient_idle",
-                            "request_id": str(uuid.uuid4()),
-                        }
-                        await self.tools["output"].handle(create_ws_data_packet(ambient_frame, meta_info=idle_meta_info))
+                        AMBIENT_IDLE_FRAME_S = 0.5
+                        now = time.monotonic()
+                        if self._ambient_next_due is None:
+                            self._ambient_next_due = now
+                        if now >= self._ambient_next_due:
+                            frame_samples = int(8000 * AMBIENT_IDLE_FRAME_S)
+                            silence_frame = b"\x00\x00" * frame_samples
+                            ambient_frame, self.ambient_noise_pos = mix_pcm_with_loop(
+                                silence_frame, self.ambient_noise_pcm, self.ambient_noise_pos, volume=self.ambient_noise_volume
+                            )
+                            idle_meta_info = {
+                                "sequence_id": -1,
+                                "format": "pcm",
+                                "message_category": "ambient_idle",
+                                "request_id": str(uuid.uuid4()),
+                            }
+                            await self.tools["output"].handle(
+                                create_ws_data_packet(ambient_frame, meta_info=idle_meta_info)
+                            )
+                            # Schedule the next send AMBIENT_IDLE_FRAME_S after this one was
+                            # due — but never behind "now". If a send (or the channel) is
+                            # running slow, this resyncs to the current time instead of
+                            # queuing up catch-up debt that would only make the backlog
+                            # worse; a background ambience track being a fraction of a
+                            # second out of phase with wall-clock is inaudible.
+                            self._ambient_next_due = max(self._ambient_next_due + AMBIENT_IDLE_FRAME_S, now)
                     continue
 
                 if "end_of_conversation" in message["meta_info"]:
