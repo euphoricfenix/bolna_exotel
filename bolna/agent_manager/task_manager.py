@@ -3826,7 +3826,14 @@ class TaskManager(BaseManager):
                         self._stage_assistant_history(meta_info, filler_message)
                         self.conversation_history.sync_interim(messages)
 
-                        if self.use_fillers and self.filler_filenames:
+                        # Only play the pre-call filler if the latency filler hasn't already
+                        # fired for this same generation — otherwise a slow tool-decision
+                        # produces BOTH a latency filler AND this one back-to-back (the
+                        # "bunch of fillers at once" bug). One filler per generation, max.
+                        if self.use_fillers and self.filler_filenames and not filler_played_flag["played"]:
+                            filler_played_flag["played"] = True
+                            if latency_filler_task is not None:
+                                latency_filler_task.cancel()
                             filler_key = random.choice(self.filler_filenames)
                             logger.info(f"Playing preset filler audio '{filler_key}' instead of synthesizing text")
                             filler_meta_info = copy.deepcopy(meta_info)
