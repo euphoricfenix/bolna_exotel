@@ -1,6 +1,6 @@
-region: us
+region: in
 version: '2'
-authtoken: 
+authtoken: REPLACE_WITH_YOUR_NGROK_AUTHTOKEN
 tunnels:
   exotel-app:
     addr: exotel-app:8003

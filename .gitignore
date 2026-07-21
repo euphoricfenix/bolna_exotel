@@ -183,4 +183,4 @@ test_3.wav
 scripts/
 docs/
 GRAPH_AGENT_GUIDE.md
-.env.example
+.env.examplelocal_setup/ngrok-config.yml
