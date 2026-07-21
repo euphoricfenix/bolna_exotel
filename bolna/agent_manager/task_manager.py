@@ -3297,8 +3297,13 @@ class TaskManager(BaseManager):
             self.execute_function_call_task = None
             return
 
-        await self.wait_for_current_message()
-
+        # NOTE: no wait_for_current_message() here. The pre-call filler ("just a moment",
+        # ~0.7s) plays while this runs, but the API call + the follow-up LLM generation
+        # (~1s) naturally finish *after* the filler, and response audio is serialized by
+        # sequence_id/marks — so waiting for the filler's mark to flush before firing the
+        # API was ~1s of pure dead air per tool call with no ordering benefit. Fire now;
+        # the follow-up generation provides the spacing. (end_call/transfer keep their own
+        # waits — they returned earlier and never reach this point.)
         if self.hangup_triggered or self.conversation_ended:
             logger.info(
                 f"__execute_function_call: Aborting before API call — hangup_triggered={self.hangup_triggered}, conversation_ended={self.conversation_ended}"
